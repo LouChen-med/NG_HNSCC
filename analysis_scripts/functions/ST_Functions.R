@@ -1677,3 +1677,535 @@ plot_spatial_feats <- function(
   plot <- plot + coord_fixed() + theme(aspect.ratio = 1) + NoAxes() + theme(panel.background = element_blank())
   return(plot)
 }
+
+
+
+# Revision Script Helper Functions ----------------------------------------
+
+make_boxdot <- function(
+  dat, yvar, ylab, binwidth,
+  box_width = 0.6,
+  dot_mm = 2,
+  x_var = NULL,
+  x_labels = NULL,        # optional named vector for relabels
+  x_order = NULL,         # optional character vector for order
+  tilt_x_text = FALSE,
+  y_limits = NULL,
+  panel_w = grid::unit(30, "mm"),
+  panel_h = grid::unit(60, "mm"),
+  expend_mult_y = 0.005,
+  expand_top = NULL,
+  wrap_y_title = TRUE,
+  ylab_width = NULL,
+  percent_y = FALSE,
+  percent_accuracy = 1,
+  dot_fill = NULL,        # single color for all dots; if NULL, map to a variable
+  map_fill_to = "Sample", # column to map fill to when dot_fill is NULL
+  dot_outline = "black",
+  dot_alpha = 1,
+  dot_palette = NULL,
+  test_method = c("wilcox.test", "t.test"),
+  test_method_args = list()
+) {
+  test_method <- match.arg(test_method)
+
+  # pick x variable if not supplied
+  if (is.null(x_var)) {
+    x_var <- intersect(c("Set", "pEMT_Pattern", "coherent", "group"), names(dat))[1]
+    if (length(x_var) == 0) stop("Provide x_var or include a column named Set, pEMT_Pattern, coherent, or group.")
+  }
+  if (!x_var %in% names(dat)) stop("x_var='", x_var, "' not found in data.")
+
+  # build x_plot (supports Core/Edge mapping and coherent TRUE/FALSE)
+  dat2 <- dplyr::mutate(
+    dat,
+    .x_raw = as.character(.data[[x_var]]),
+    x_plot = dplyr::case_when(
+      # Core/Edge style
+      stringr::str_detect(.x_raw, stringr::regex("core", ignore_case = TRUE)) ~ "Core",
+      stringr::str_detect(.x_raw, stringr::regex("edge|margin", ignore_case = TRUE)) ~ "Edge",
+      # coherent logical/character
+      .x_raw %in% c("TRUE", "T", "1") ~ "Coherent",
+      .x_raw %in% c("FALSE", "F", "0") ~ "Non-coherent",
+      TRUE ~ .x_raw # otherwise, use as-is
+    )
+  )
+
+  # optional relabel/order
+  if (!is.null(x_labels)) {
+    dat2$x_plot <- dplyr::recode(dat2$x_plot, !!!x_labels)
+  }
+  if (!is.null(x_order)) {
+    dat2$x_plot <- factor(dat2$x_plot, levels = x_order)
+  } else {
+    if (all(c("Non-coherent", "Coherent") %in% unique(dat2$x_plot))) {
+      dat2$x_plot <- factor(dat2$x_plot, levels = c("Non-coherent", "Coherent"))
+    } else if (all(c("Core", "Edge") %in% unique(dat2$x_plot))) {
+      dat2$x_plot <- factor(dat2$x_plot, levels = c("Core", "Edge"))
+    } else {
+      dat2$x_plot <- factor(dat2$x_plot)
+    }
+  }
+
+  # remove rows with NA in the y variable to avoid length mismatch
+  dat2 <- dat2[!is.na(dat2[[yvar]]), ]
+
+  # y-axis label wrapping
+  ylab_final <- ylab %||% yvar
+  if (isTRUE(wrap_y_title) && is.character(ylab_final)) {
+    w <- ylab_width
+    if (is.null(w)) w <- if (nchar(ylab_final) > 28) 28 else Inf
+    if (is.finite(w)) ylab_final <- stringr::str_wrap(ylab_final, width = w)
+  }
+
+  # constant dot size (in mm) regardless of binwidth
+  panel_h_mm <- as.numeric(grid::convertUnit(panel_h, "mm", valueOnly = TRUE))
+  yrange <- if (is.null(y_limits)) diff(range(dat2[[yvar]], na.rm = TRUE)) else diff(y_limits)
+  if (yrange <= 0) yrange <- 1
+  dotsize_eff <- (dot_mm / panel_h_mm) * (yrange / binwidth)
+
+  # which test & comparisons
+  lv <- levels(dat2$x_plot)
+  n_groups <- length(lv)
+
+  if (n_groups == 2) {
+    comps <- list(lv)
+    use_ggpubr <- TRUE
+  } else if (n_groups > 2) {
+    use_ggpubr <- FALSE
+    kw_test <- kruskal.test(dat2[[yvar]] ~ dat2$x_plot)
+    kw_pval <- kw_test$p.value
+    kw_label <- if (kw_pval < 0.001) {
+      "p < 0.001"
+    } else if (kw_pval < 0.01) {
+      paste0("p = ", format(kw_pval, digits = 3))
+    } else {
+      paste0("p = ", format(kw_pval, digits = 2))
+    }
+  } else {
+    use_ggpubr <- FALSE
+  }
+
+  p <- ggplot2::ggplot(dat2, ggplot2::aes(x = x_plot, y = .data[[yvar]])) +
+    ggplot2::geom_boxplot(
+      linewidth = 0.9, width = box_width, fatten = 1,
+      fill = "lightgray", outlier.shape = NA
+    )
+
+  if (!is.null(dot_fill)) {
+    p <- p + ggplot2::geom_dotplot(
+      binaxis = "y", method = "dotdensity", stackdir = "center",
+      stackgroups = TRUE, binpositions = "all", binwidth = binwidth,
+      dotsize = dotsize_eff, fill = dot_fill, colour = dot_outline,
+      alpha = dot_alpha, stroke = 0.9
+    )
+  } else if (!is.null(map_fill_to) && map_fill_to %in% names(dat2)) {
+    p <- p + ggplot2::geom_dotplot(
+      ggplot2::aes(fill = .data[[map_fill_to]]),
+      binaxis = "y", method = "dotdensity", stackdir = "center",
+      stackgroups = TRUE, binpositions = "all", binwidth = binwidth,
+      dotsize = dotsize_eff, colour = dot_outline, alpha = dot_alpha, stroke = 0.9
+    )
+    if (!is.null(dot_palette)) {
+      p <- p + ggplot2::scale_fill_manual(values = dot_palette)
+    }
+  } else {
+    p <- p + ggplot2::geom_dotplot(
+      binaxis = "y", method = "dotdensity", stackdir = "center",
+      stackgroups = TRUE, binpositions = "all", binwidth = binwidth,
+      dotsize = dotsize_eff, fill = "black", colour = dot_outline,
+      alpha = dot_alpha, stroke = 0.9
+    )
+  }
+
+  if (is.null(expand_top)) {
+    top_expansion <- if (n_groups > 1) 0.12 else 0.06
+  } else {
+    top_expansion <- expand_top
+  }
+
+  p <- p + ggplot2::labs(x = NULL, y = ylab_final) +
+    ggplot2::scale_y_continuous(
+      limits = y_limits,
+      expand = ggplot2::expansion(mult = c(expend_mult_y, top_expansion)),
+      labels = if (percent_y) scales::percent_format(accuracy = percent_accuracy) else ggplot2::waiver()
+    )
+
+  if (use_ggpubr && n_groups == 2) {
+    p <- p + ggpubr::stat_compare_means(
+      ggplot2::aes(group = x_plot),
+      method = test_method,
+      method.args = test_method_args,
+      comparisons = comps,
+      label.y = if (is.null(y_limits)) max(dat2[[yvar]], na.rm = TRUE) else y_limits[2],
+      size = 4
+    )
+  } else if (n_groups > 2) {
+    y_pos <- if (is.null(y_limits)) max(dat2[[yvar]], na.rm = TRUE) else y_limits[2]
+    x_pos <- (n_groups + 1) / 2
+
+    p <- p + ggplot2::annotate(
+      "text", x = x_pos, y = y_pos,
+      label = kw_label, size = 4, hjust = 0.5, vjust = -0.5
+    )
+  }
+
+  p + (if (exists("common_theme")) common_theme else ggplot2::theme_classic()) +
+    ggplot2::coord_cartesian(clip = "off") +
+    ggh4x::force_panelsizes(rows = panel_h, cols = panel_w, respect = TRUE) +
+    if (tilt_x_text) {
+      ggplot2::theme(axis.text.x = ggplot2::element_text(angle = 45, hjust = 1))
+    } else {
+      ggplot2::theme()
+    }
+}
+
+
+normalize_deg_input <- function(df) {
+  nms <- names(df)
+  if (all(c("Gene", "x", "Pval") %in% nms)) {
+    out <- df %>%
+      dplyr::transmute(
+        Gene = toupper(Gene),
+        x    = as.numeric(x),
+        Pval = as.numeric(Pval),
+        direction = if ("direction" %in% nms) direction else ifelse(x >= 0, "Up in multiclonal", "Up in uniclonal"),
+        Label = if ("Label" %in% nms) Label else NA_character_
+      )
+    return(out)
+  }
+  if (all(c("gene", "logFC", "p_value") %in% nms)) {
+    has_flag <- "flag_top10" %in% nms
+    has_pt   <- "point_type" %in% nms
+    out <- df %>%
+      dplyr::transmute(
+        Gene = toupper(gene),
+        x    = as.numeric(logFC),
+        Pval = as.numeric(p_value),
+        direction = ifelse(x >= 0, "Up in multiclonal", "Up in uniclonal"),
+        Label = dplyr::case_when(
+          has_flag & isTRUE(flag_top10)                                 ~ Gene,
+          has_pt   & stringr::str_detect(as.character(point_type), "Top-10") ~ Gene,
+          TRUE ~ NA_character_
+        )
+      )
+    return(out)
+  }
+  stop("Unrecognized input: expected columns [Gene,x,Pval] or [gene,logFC,p_value].")
+}
+
+
+tcell_enrichment_counts <- function(
+  df, markers, top_n = 10,
+  use_labels = TRUE,
+  count_only_sig = FALSE, sig_p = 0.05,
+  allow_multi_membership = TRUE,
+  tag = NULL
+) {
+  dat <- normalize_deg_input(df)
+
+  markers_tbl <- tibble::tibble(Category = names(markers), Gene = markers) %>%
+    tidyr::unnest(Gene) %>%
+    dplyr::mutate(Gene = toupper(Gene))
+
+  if (use_labels && any(!is.na(dat$Label))) {
+    top_genes <- dat %>%
+      dplyr::filter(!is.na(Label)) %>%
+      dplyr::distinct(Gene, direction, Pval)
+  } else {
+    top_genes <- dat %>%
+      dplyr::group_by(direction) %>%
+      dplyr::arrange(Pval, dplyr::desc(abs(x)), .by_group = TRUE) %>%
+      dplyr::slice_head(n = top_n) %>%
+      dplyr::ungroup() %>%
+      dplyr::distinct(Gene, direction, Pval)
+  }
+  if (count_only_sig) top_genes <- dplyr::filter(top_genes, Pval < sig_p)
+
+  hits <- dplyr::inner_join(top_genes, markers_tbl, by = "Gene")
+  if (!allow_multi_membership) {
+    hits <- hits %>% dplyr::group_by(Gene) %>% dplyr::slice_head(n = 1) %>% dplyr::ungroup()
+  }
+
+  all_cats <- names(markers)
+  all_dir  <- c("Up in multiclonal", "Up in uniclonal")
+
+  counts <- hits %>%
+    dplyr::count(Category, direction, name = "n") %>%
+    tidyr::complete(Category = all_cats, direction = all_dir, fill = list(n = 0)) %>%
+    dplyr::group_by(Category) %>%
+    dplyr::mutate(total = sum(n)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      Category  = forcats::fct_reorder(Category, total),
+      direction = factor(direction, levels = all_dir)
+    ) %>%
+    dplyr::select(-total)
+
+  if (!is.null(tag)) counts <- dplyr::mutate(counts, Comparison = tag)
+  counts
+}
+
+
+# Compute enrichment per category & group using hypergeometric model
+tcell_enrichment_scores <- function(
+  df, markers,
+  top_n = 10,
+  use_labels = TRUE,
+  universe_genes = NULL,
+  allow_multi_membership = TRUE,
+  add_pseudocount = FALSE,
+  pc = 0.5
+) {
+  dat <- normalize_deg_input(df)
+
+  if (is.null(universe_genes)) {
+    universe_genes <- unique(unlist(markers))
+  }
+  universe_genes <- toupper(universe_genes)
+
+  if (use_labels && any(!is.na(dat$Label))) {
+    tops <- dat %>% dplyr::filter(!is.na(Label)) %>% dplyr::distinct(Gene, direction)
+  } else {
+    tops <- dat %>%
+      dplyr::group_by(direction) %>%
+      dplyr::arrange(Pval, dplyr::desc(abs(x)), .by_group = TRUE) %>%
+      dplyr::slice_head(n = top_n) %>%
+      dplyr::ungroup() %>%
+      dplyr::distinct(Gene, direction)
+  }
+
+  tops <- tops %>% dplyr::filter(Gene %in% universe_genes)
+  N <- length(universe_genes)
+
+  cat_tbl <- tibble::tibble(Category = names(markers), Gene = markers) %>%
+    tidyr::unnest(Gene) %>%
+    dplyr::mutate(Gene = toupper(Gene)) %>%
+    dplyr::filter(Gene %in% universe_genes)
+
+  k_tbl <- tops %>%
+    dplyr::inner_join(cat_tbl, by = "Gene") %>%
+    dplyr::count(Category, direction, name = "k")
+
+  all_cats <- names(markers)
+  all_dir  <- c("Up in multiclonal", "Up in uniclonal")
+  k_tbl <- k_tbl %>%
+    tidyr::complete(Category = all_cats, direction = all_dir, fill = list(k = 0))
+
+  n_sizes <- tops %>% dplyr::count(direction, name = "n")
+  k_tbl <- k_tbl %>% dplyr::left_join(n_sizes, by = "direction")
+
+  m_tbl <- cat_tbl %>% dplyr::distinct(Category, Gene) %>% dplyr::count(Category, name = "m")
+
+  out <- k_tbl %>%
+    dplyr::left_join(m_tbl, by = "Category") %>%
+    dplyr::mutate(
+      N = N,
+      exp = n * (m / N),
+      var = n * (m / N) * (1 - m / N) * ((N - n) / (N - 1)),
+      z   = ifelse(var > 0, (k - exp) / sqrt(var), NA_real_),
+      p   = phyper(q = pmax(k - 1, 0), m = m, n = N - m, k = n, lower.tail = FALSE),
+      coverage = ifelse(m > 0, k / m, NA_real_),
+      frac_top = ifelse(n > 0, k / n, NA_real_),
+      FE  = if (add_pseudocount)
+        ((k + pc) / (n + 2 * pc)) / ((m + pc) / (N + 2 * pc))
+      else
+        (frac_top) / (m / N),
+      log2FE = log2(FE)
+    ) %>%
+    dplyr::group_by(direction) %>%
+    dplyr::mutate(FDR = p.adjust(p, method = "BH")) %>%
+    dplyr::ungroup() %>%
+    dplyr::arrange(direction, dplyr::desc(z))
+
+  out
+}
+
+
+# Custom palette: white -> brightest magma -> ... -> darkest magma
+magma_soft_cols <- function() {
+  c(
+    grDevices::colorRampPalette(c("white", tail(viridis::magma(323, begin = 0.15), 1)))(10),
+    rev(viridis::magma(323, begin = 0.18))
+  )
+}
+
+
+plot_tcell_enrichment <- function(
+  df,
+  mode = c("auto", "counts", "scores"),
+  bar_height = 0.55,
+  gap = 0.25,
+  pad_units = 0.30,
+  colors_counts = c(
+    "Up in uniclonal"   = "#4393c3",
+    "Up in multiclonal" = "#d6604d"
+  ),
+  label_counts = TRUE,
+  fill_limits = NULL,
+  fill_breaks = NULL,
+  fill_oob = scales::squish,
+  na_fill_scores = "grey85",
+  label_scores = FALSE
+) {
+  mode <- match.arg(mode)
+  if (mode == "auto") {
+    mode <- if ("log2FE" %in% names(df)) {
+      "scores"
+    } else if ("n" %in% names(df)) {
+      "counts"
+    } else {
+      stop("Need either 'n' (counts) or 'log2FE' + 'FDR' (scores).")
+    }
+  }
+  if (!"Comparison" %in% names(df)) df$Comparison <- " "
+
+  df <- df %>%
+    dplyr::mutate(
+      Category       = as.character(Category),
+      direction      = factor(direction, levels = c("Up in multiclonal", "Up in uniclonal")),
+      CategoryPretty = stringr::str_replace_all(Category, "_", " ")
+    )
+
+  if (mode == "counts") {
+    df <- df %>%
+      dplyr::group_by(Comparison, CategoryPretty) %>%
+      dplyr::filter(sum(n, na.rm = TRUE) > 0) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(
+        x_plot   = ifelse(direction == "Up in uniclonal", -as.numeric(n), as.numeric(n)),
+        fill_key = direction
+      )
+  } else {
+    df <- df %>%
+      dplyr::mutate(
+        log2FE     = as.numeric(log2FE),
+        FDR        = as.numeric(FDR),
+        log2FE_pos = ifelse(is.finite(log2FE) & log2FE > 0, log2FE, 0),
+        sig_fill   = -log10(pmax(FDR, 1e-300))
+      ) %>%
+      dplyr::group_by(Comparison, CategoryPretty) %>%
+      dplyr::filter(sum(log2FE_pos, na.rm = TRUE) > 0) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(
+        x_plot   = ifelse(direction == "Up in uniclonal", -log2FE_pos, log2FE_pos),
+        fill_key = as.numeric(sig_fill)
+      )
+  }
+
+  ord <- df %>%
+    dplyr::group_by(Comparison, CategoryPretty) %>%
+    dplyr::summarise(
+      score = sum(x_plot, na.rm = TRUE),
+      mag   = sum(abs(x_plot), na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    dplyr::arrange(Comparison, dplyr::desc(score), dplyr::desc(mag)) %>%
+    dplyr::group_by(Comparison) %>%
+    dplyr::mutate(
+      idx      = dplyr::row_number(),
+      pitch    = bar_height + gap,
+      y_center = (dplyr::n() - idx) * pitch
+    ) %>%
+    dplyr::ungroup()
+
+  df <- df %>%
+    dplyr::left_join(ord, by = c("Comparison", "CategoryPretty")) %>%
+    dplyr::mutate(
+      xmin = pmin(0, x_plot),
+      xmax = pmax(0, x_plot),
+      ymin = y_center - bar_height/2,
+      ymax = y_center + bar_height/2
+    )
+
+  xmax_abs <- ifelse(nrow(df) == 0, 1, max(abs(df$x_plot), na.rm = TRUE))
+  lim      <- xmax_abs + pad_units
+  lab_nudge <- max(0.12, 0.03 * lim)
+  y_breaks <- ord$y_center
+  y_labels <- ord$CategoryPretty
+
+  p <- ggplot2::ggplot(df) +
+    ggplot2::geom_rect(
+      ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax),
+      fill = NA, colour = "black", linewidth = 0.25, inherit.aes = FALSE
+    ) +
+    ggplot2::geom_vline(xintercept = 0, colour = "grey40", linewidth = 0.6) +
+    ggplot2::coord_cartesian(xlim = c(-lim, lim), clip = "off") +
+    ggplot2::scale_y_continuous(breaks = y_breaks, labels = y_labels) +
+    ggplot2::labs(y = NULL) +
+    ggplot2::theme_classic(base_size = 12) +
+    ggplot2::theme(
+      strip.background = ggplot2::element_blank(),
+      strip.text       = ggplot2::element_blank(),
+      panel.border     = ggplot2::element_rect(colour = "black", fill = NA, linewidth = 1.2),
+      axis.line        = ggplot2::element_blank(),
+      legend.position  = "right"
+    )
+
+  if (mode == "counts") {
+    p <- p +
+      ggplot2::geom_rect(
+        ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill_key),
+        inherit.aes = FALSE, show.legend = TRUE
+      ) +
+      ggplot2::scale_x_continuous(labels = function(x) abs(x)) +
+      ggplot2::scale_fill_manual(values = colors_counts, name = "Direction") +
+      ggplot2::labs(x = "Top-gene counts per category")
+
+    if (label_counts) {
+      df_lab <- df %>%
+        dplyr::mutate(
+          lab       = ifelse(abs(x_plot) > 0, abs(x_plot), NA),
+          lab_x     = ifelse(x_plot > 0, xmax + lab_nudge, xmin - lab_nudge),
+          lab_hjust = ifelse(x_plot > 0, 0, 1)
+        )
+      p <- p + ggplot2::geom_text(
+        data = df_lab,
+        ggplot2::aes(x = lab_x, y = y_center, label = lab, hjust = lab_hjust),
+        vjust = 0.5, size = 3, na.rm = TRUE
+      )
+    }
+
+  } else {
+    p <- p +
+      ggplot2::geom_rect(
+        ggplot2::aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = fill_key),
+        inherit.aes = FALSE, show.legend = TRUE
+      ) +
+      ggplot2::scale_x_continuous(labels = function(x) abs(x)) +
+      ggplot2::labs(x = expression("Enrichment  log"[2]*"FE")) +
+      ggplot2::scale_fill_gradientn(
+        colors   = magma_soft_cols(),
+        name     = expression("-log"[10]*"FDR"),
+        limits   = fill_limits,
+        breaks   = fill_breaks,
+        oob      = fill_oob,
+        na.value = na_fill_scores,
+        guide    = ggplot2::guide_colorbar(
+          title.position = "top",
+          frame.colour   = "black",
+          ticks.colour   = "black"
+        )
+      )
+
+    if (label_scores) {
+      df_lab <- df %>%
+        dplyr::mutate(
+          lab       = ifelse(is.finite(x_plot) & x_plot != 0, sprintf("%.2f", abs(x_plot)), NA),
+          lab_x     = ifelse(x_plot > 0, xmax + lab_nudge, xmin - lab_nudge),
+          lab_hjust = ifelse(x_plot > 0, 0, 1)
+        )
+      p <- p + ggplot2::geom_text(
+        data = df_lab,
+        ggplot2::aes(x = lab_x, y = y_center, label = lab, hjust = lab_hjust),
+        vjust = 0.5, size = 3, na.rm = TRUE
+      )
+    }
+  }
+
+  if (length(unique(df$Comparison)) > 1) {
+    p <- p + ggplot2::facet_wrap(~ Comparison, ncol = 1, scales = "free_y")
+  }
+
+  p
+}
