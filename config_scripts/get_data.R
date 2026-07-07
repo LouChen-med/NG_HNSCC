@@ -68,6 +68,30 @@ for (file in files) {
   }
 }
 
+# Arrange Visium HD sample files into their Space Ranger `outs/binned_outputs` structure -------
+# These two samples (P5684, P5624) are not part of the flat data/<Site>/<Sample>/ layout above
+visiumHD_gsm2sample <- c(GSM9701483 = "P5684", GSM9701484 = "P5624")
+visiumHD_files <- list.files(here("data"), pattern = paste(paste0("^", names(visiumHD_gsm2sample), "_"), collapse = "|"))
+for (file in visiumHD_files) {
+  gsm <- sub("^([^_]+)_.*", "\\1", file)
+  sample <- visiumHD_gsm2sample[[gsm]]
+  bin_dir <- file.path(here("data"), "VisiumHD", sample, "outs", "binned_outputs", "square_016um")
+  spatial_dir <- file.path(bin_dir, "spatial")
+  if (!dir.exists(spatial_dir)) {
+    dir.create(spatial_dir, recursive = TRUE)
+  }
+
+  # Clean file name from GSM, sample-name and "hd" prefixes
+  new_name <- sub(paste0("^", gsm, "_", sample, "_hd_"), "", file)
+
+  # Move spatial image, scale-factor and coordinate files to a spatial sub-directory, and expression files to the binned-outputs directory
+  if (grepl("tissue_positions|tissue_lowres_image|tissue_hires_image|scalefactors_json|detected_tissue_image", new_name)) {
+    file.rename(file.path(here("data"), file), file.path(spatial_dir, new_name))
+  } else {
+    file.rename(file.path(here("data"), file), file.path(bin_dir, new_name))
+  }
+}
+
 # Sort samples by tumor site (laryngeal, oral, oropharyngeal)
 samp_param <- readRDS(file = here("metadata/per_sample_parameters_df.rds"))
 if (!dir.exists(file.path(here("data"), "Laryngeal_CA"))) {
