@@ -1,0 +1,14 @@
+# R and renv versions match the upstream renv.lock.
+# Restore the R packages separately from renv.lock; this file is the bootstrap.
+# Python is used by Seurat/reticulate for Leiden clustering.
+name: NG_HNSCC_env
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - r-base=4.4.1
+  - r-renv=1.0.11
+  - make
+  - python=3.11
+  - python-igraph=0.11
+  - leidenalg=0.10
